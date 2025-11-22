@@ -98,7 +98,7 @@ router.post('/register', async (req, res) => {
 });
 router.post('/login', async (req, res) => {
   console.log('=========================');
-  console.log('User Login Attempt');
+  console.log('Login Attempt');
   console.log('Request Body:', req.body);
 
   const { email, password } = req.body;
@@ -107,21 +107,83 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ email });
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPassword = password.trim();
+
+    // Check if this is the admin email
+    if (trimmedEmail === 'admin@bitsa.com') {
+      // Check if admin user exists in database
+      let adminUser = await User.findOne({ email: trimmedEmail });
+      
+      if (!adminUser) {
+        // Create admin user if it doesn't exist (only if using default password)
+        if (trimmedPassword === 'admin123') {
+          adminUser = new User({
+            name: 'Admin',
+            email: trimmedEmail,
+            password: trimmedPassword, // Will be hashed by pre-save hook
+            role: 'admin'
+          });
+          await adminUser.save();
+          console.log('Admin user created in database');
+        } else {
+          return res.status(400).json({ message: 'Invalid credentials' });
+        }
+      } else {
+        // Admin user exists - verify password (works with both default and changed passwords)
+        const isMatch = await adminUser.matchPassword(trimmedPassword);
+        if (!isMatch) {
+          return res.status(400).json({ message: 'Invalid credentials' });
+        }
+        
+        // Ensure user has admin role
+        if (adminUser.role !== 'admin') {
+          adminUser.role = 'admin';
+          await adminUser.save();
+          console.log('User role updated to admin');
+        }
+      }
+
+      const token = jwt.sign(
+        { id: adminUser._id, role: 'admin' },
+        process.env.JWT_SECRET || 'your_jwt_secret',
+        { expiresIn: '1d' }
+      );
+
+      console.log('Admin login successful');
+      return res.json({
+        message: 'Login successful',
+        token,
+        user: {
+          id: adminUser._id,
+          name: adminUser.name,
+          email: adminUser.email,
+          role: 'admin',
+          studentId: adminUser.studentId,
+          course: adminUser.course,
+          year: adminUser.year,
+          photo: adminUser.photo,
+        },
+      });
+    }
+
+    // Regular user login
+    const user = await User.findOne({ email: trimmedEmail });
     if (!user) {
-      console.log('User not found for email:', email);
+      console.log('User not found for email:', trimmedEmail);
       return res.status(400).json({ message: 'Invalid credentials' });
     }
-    const isMatch = await user.matchPassword(password);
+    
+    const isMatch = await user.matchPassword(trimmedPassword);
     console.log('Password match:', isMatch);
 
     if (!isMatch) {
-      console.log('Invalid password for user:', email);
-      
+      console.log('Invalid password for user:', trimmedEmail);
       return res.status(400).json({ 
         message: 'Invalid credentials. If you registered before recent updates, please reset your password or contact support.' 
       });
     }
+    
     const token = jwt.sign(
       { id: user._id, role: user.role },
       process.env.JWT_SECRET || 'your_jwt_secret',

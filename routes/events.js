@@ -14,8 +14,23 @@ router.get('/', async (req, res) => {
   try {
     const events = await Event.find()
       .sort({ date: -1 })
-      .populate('registeredUsers', 'name email');
-    res.json(events);
+      .populate({
+        path: 'registeredUsers',
+        select: 'name email',
+        match: { _id: { $exists: true } }
+      });
+    
+    // Filter out null values from populate and clean up invalid ObjectIds
+    const cleanedEvents = events.map(event => {
+      const eventObj = event.toObject();
+      // Filter out null/undefined populated users
+      if (eventObj.registeredUsers) {
+        eventObj.registeredUsers = eventObj.registeredUsers.filter(user => user !== null && user !== undefined);
+      }
+      return eventObj;
+    });
+    
+    res.json(cleanedEvents);
   } catch (err) {
     console.error('Error fetching events:', err);
     res.status(500).json({ message: 'Server error fetching events', error: err.message });
@@ -25,9 +40,20 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const event = await Event.findById(req.params.id)
-      .populate('registeredUsers', 'name email');
+      .populate({
+        path: 'registeredUsers',
+        select: 'name email',
+        match: { _id: { $exists: true } }
+      });
     if (!event) return res.status(404).json({ message: 'Event not found' });
-    res.json(event);
+    
+    // Filter out null values from populate
+    const eventObj = event.toObject();
+    if (eventObj.registeredUsers) {
+      eventObj.registeredUsers = eventObj.registeredUsers.filter(user => user !== null && user !== undefined);
+    }
+    
+    res.json(eventObj);
   } catch (err) {
     console.error('Error fetching event:', err);
     res.status(500).json({ message: 'Server error fetching event', error: err.message });
@@ -111,6 +137,11 @@ router.delete('/:id', verifyAdmin, async (req, res) => {
 
 router.post('/:id/register', protect, async (req, res) => {
   try {
+    // Check if user exists
+    if (!req.user) {
+      return res.status(401).json({ message: 'User not found. Please log in again.' });
+    }
+
     const event = await Event.findById(req.params.id);
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
@@ -136,7 +167,11 @@ router.post('/:id/register', protect, async (req, res) => {
 
     await registration.save();
 
-    if (!event.registeredUsers.includes(userId)) {
+    // Check if userId is already in registeredUsers array
+    const userIdString = userId.toString();
+    const isAlreadyInArray = event.registeredUsers.some(id => id.toString() === userIdString);
+    
+    if (!isAlreadyInArray) {
       event.registeredUsers.push(userId);
       await event.save();
     }
@@ -157,14 +192,34 @@ router.get('/:id/registrations', verifyAdmin, async (req, res) => {
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
     const registrations = await Registration.find({ event: req.params.id })
-      .populate('user', 'name email studentId course year')
-      .populate('reviewedBy', 'name email')
+      .populate({
+        path: 'user',
+        select: 'name email studentId course year',
+        match: { _id: { $exists: true } }
+      })
+      .populate({
+        path: 'reviewedBy',
+        select: 'name email',
+        match: { _id: { $exists: true } }
+      })
       .sort({ registeredAt: -1 });
+
+    // Filter out registrations with null users
+    const cleanedRegistrations = registrations
+      .filter(reg => reg.user !== null && reg.user !== undefined)
+      .map(reg => {
+        const regObj = reg.toObject();
+        // Ensure reviewedBy is null if it doesn't exist
+        if (!regObj.reviewedBy) {
+          regObj.reviewedBy = null;
+        }
+        return regObj;
+      });
 
     res.json({ 
       event: { id: event._id, title: event.title },
-      count: registrations.length,
-      registrations 
+      count: cleanedRegistrations.length,
+      registrations: cleanedRegistrations
     });
   } catch (err) {
     console.error('Error fetching registrations:', err);
@@ -181,16 +236,33 @@ router.put('/registrations/:registrationId/status', verifyAdmin, async (req, res
     }
 
     const registration = await Registration.findById(req.params.registrationId)
-      .populate('user', 'name email')
-      .populate('event', 'title');
+      .populate({
+        path: 'user',
+        select: 'name email',
+        match: { _id: { $exists: true } }
+      })
+      .populate({
+        path: 'event',
+        select: 'title',
+        match: { _id: { $exists: true } }
+      });
 
     if (!registration) {
       return res.status(404).json({ message: 'Registration not found' });
     }
 
+    if (!registration.user) {
+      return res.status(404).json({ message: 'User associated with registration not found' });
+    }
+
     registration.status = status;
     registration.reviewedAt = new Date();
-    registration.reviewedBy = req.admin.id;
+    // Note: reviewedBy is a User reference, so we only set it if it's a valid ObjectId
+    // For admin reviews, we'll leave it null or try to find a user by email
+    if (req.admin.id && mongoose.Types.ObjectId.isValid(req.admin.id)) {
+      registration.reviewedBy = req.admin.id;
+    }
+    // Otherwise, leave reviewedBy as null (admin reviews won't have a user reference)
     if (notes) registration.notes = notes;
 
     await registration.save();
@@ -207,11 +279,25 @@ router.put('/registrations/:registrationId/status', verifyAdmin, async (req, res
 
 router.get('/user/registrations', protect, async (req, res) => {
   try {
+    // Check if user exists
+    if (!req.user) {
+      return res.status(401).json({ message: 'User not found. Please log in again.' });
+    }
+
     const registrations = await Registration.find({ user: req.user._id })
-      .populate('event', 'title description date location status imageUrl')
+      .populate({
+        path: 'event',
+        select: 'title description date location status imageUrl',
+        match: { _id: { $exists: true } }
+      })
       .sort({ registeredAt: -1 });
 
-    res.json({ registrations });
+    // Filter out registrations with null events
+    const cleanedRegistrations = registrations
+      .filter(reg => reg.event !== null && reg.event !== undefined)
+      .map(reg => reg.toObject());
+
+    res.json({ registrations: cleanedRegistrations });
   } catch (err) {
     console.error('Error fetching user registrations:', err);
     res.status(500).json({ message: 'Server error fetching registrations', error: err.message });

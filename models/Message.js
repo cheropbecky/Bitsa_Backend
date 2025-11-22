@@ -7,6 +7,8 @@ const messageSchema = new mongoose.Schema({
   message: { type: String, required: true },
   createdAt: { type: Date, default: Date.now },
   status: { type: String, enum: ["unread", "read"], default: "unread" },
+  adminReply: { type: String },         
+  replied: { type: Boolean, default: false }, 
 });
 
 module.exports = mongoose.model("Message", messageSchema);
