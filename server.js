@@ -144,7 +144,7 @@ app.use((err, req, res, next) => {
 // ==============================
 const startServer = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
+   await mongoose.connect('mongodb+srv://beckyuser:Beckyrop%405658@cluster0.cueyr0e.mongodb.net/bitsa?retryWrites=true&w=majority&appName=Cluster0', {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
