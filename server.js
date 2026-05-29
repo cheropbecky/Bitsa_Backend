@@ -1,6 +1,6 @@
 // File: server.js
 const express = require('express');
-const mongoose = require('mongoose');
+// mongoose removed after migration to Supabase
 const dotenv = require('dotenv');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const path = require('path');
 
 dotenv.config();
+const { supabase } = require('./config/supabase');
 
 const app = express();
 
@@ -112,9 +113,29 @@ app.delete('/api/admin/users/:id', verifyAdmin, deleteUser);
 app.get('/api/admin/registrations', verifyAdmin, getAllRegistrations);
 app.get('/api/admin/messages', verifyAdmin, async (req, res) => {
   try {
-    const Message = require('./models/Message');
-    const messages = await Message.find().sort({ createdAt: -1 });
-    res.json({ count: messages.length, messages });
+    const { data: messages, error } = await supabase
+      .from('messages')
+      .select('id,name,email,subject,message,status,admin_reply,replied,created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({
+      count: messages.length,
+      messages: messages.map((message) => ({
+        id: message.id,
+        name: message.name,
+        email: message.email,
+        subject: message.subject,
+        message: message.message,
+        status: message.status,
+        adminReply: message.admin_reply,
+        replied: message.replied,
+        createdAt: message.created_at,
+      })),
+    });
   } catch (err) {
     console.error('Get messages error:', err);
     res.status(500).json({ message: 'Server error' });
@@ -139,22 +160,8 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ message: err.message || 'Server error' });
 });
 
-// ==============================
-// DATABASE + SERVER START
-// ==============================
-const startServer = async () => {
-  try {
-   await mongoose.connect(process.env.MONGO_URI);
-    console.log('MongoDB connected ✅');
-
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT} 🚀`);
-      console.log(`Frontend URL: ${process.env.CLIENT_URL}`);
-    });
-  } catch (err) {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  }
-};
-
-startServer();
+// Start server (no MongoDB connection needed after migration)
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT} 🚀`);
+  console.log(`Frontend URL: ${process.env.CLIENT_URL}`);
+});

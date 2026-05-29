@@ -2,18 +2,79 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
+const bcrypt = require('bcryptjs');
 
-const User = require('../models/User');
+const { supabase } = require('../config/supabase');
 const { protect } = require('../middleware/authMiddleware');
 const memoryStorage = multer.memoryStorage();
 const upload = multer({ storage: memoryStorage });
 
+const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+const userSelect = 'id,name,email,password,role,student_id,course,year,photo,created_at';
+const publicUserSelect = 'id,name,email,role,student_id,course,year,photo,created_at';
+
+const normalizeEmail = (email) => (email || '').trim().toLowerCase();
+
+const mapUser = (user) => {
+  if (!user) return null;
+
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    studentId: user.student_id || '',
+    course: user.course || '',
+    year: user.year || '',
+    photo: user.photo || '',
+    createdAt: user.created_at,
+  };
+};
+
+const fetchUserByEmail = async (email, includePassword = false) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select(includePassword ? userSelect : publicUserSelect)
+    .eq('email', normalizeEmail(email))
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+const fetchUserById = async (id, includePassword = false) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select(includePassword ? userSelect : publicUserSelect)
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+const createToken = (user) =>
+  jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+
 
 router.get('/', async (req, res) => {
   try {
-    const users = await User.find().select('-password'); 
-    res.json({ count: users.length, users });
+    const { data: users, error } = await supabase
+      .from('users')
+      .select(publicUserSelect)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({ count: users.length, users: users.map(mapUser) });
   } catch (err) {
     console.error('GET /users error:', err);
     res.status(500).json({ message: 'Server error' });
@@ -30,31 +91,56 @@ router.get('/profile', protect, async (req, res) => {
 
 router.put('/profile', protect, upload.single('photo'), async (req, res) => {
   try {
-    const user = req.user;
+    const currentUser = req.user;
     const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
-    if (req.body.email) user.email = req.body.email.trim().toLowerCase();
+    const updateData = {};
+
+    if (req.body.email) {
+      const nextEmail = normalizeEmail(req.body.email);
+      const existingUser = await fetchUserByEmail(nextEmail);
+
+      if (existingUser && existingUser.id !== currentUser.id) {
+        return res.status(400).json({ message: 'Email already in use' });
+      }
+
+      updateData.email = nextEmail;
+    }
 
     
     if (req.file) {
       try {
         
-        if (user.photo && user.photo.includes('cloudinary')) {
-          const publicIdMatch = user.photo.match(/\/v\d+\/(.+)\./);
+        if (currentUser.photo && currentUser.photo.includes('cloudinary')) {
+          const publicIdMatch = currentUser.photo.match(/\/v\d+\/(.+)\./);
           if (publicIdMatch) {
             await deleteFromCloudinary(publicIdMatch[1]);
           }
         }
         const imageData = await uploadToCloudinary(req.file.buffer, 'bitsa_profiles');
-        user.photo = imageData.url;
+        updateData.photo = imageData.url;
       } catch (uploadErr) {
         console.error('Photo upload error:', uploadErr);
         return res.status(500).json({ message: 'Failed to upload profile picture' });
       }
     }
 
-    await user.save();
-    res.json({ user, message: 'Profile updated successfully' });
+    if (Object.keys(updateData).length === 0) {
+      return res.json({ user: currentUser, message: 'Profile updated successfully' });
+    }
+
+    const { data: updatedUser, error } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', currentUser.id)
+      .select(publicUserSelect)
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({ user: mapUser(updatedUser), message: 'Profile updated successfully' });
   } catch (err) {
     console.error('PUT /profile error:', err);
     res.status(500).json({ message: 'Server error while updating profile' });
@@ -69,27 +155,33 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: 'Please provide all required fields.' });
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await fetchUserByEmail(email);
     if (existingUser) return res.status(400).json({ message: 'User already exists' });
-    const newUser = new User({
-      name,
-      email,
-      password, 
-      studentId,
-      course,
-      year,
-    });
 
-    await newUser.save();
+    const hashedPassword = await bcrypt.hash(password.trim(), 10);
+
+    const { data: newUser, error } = await supabase
+      .from('users')
+      .insert({
+        name: name.trim(),
+        email: normalizeEmail(email),
+        password: hashedPassword,
+        student_id: studentId || '',
+        course: course || '',
+        year: year || '',
+        role: 'student',
+      })
+      .select(publicUserSelect)
+      .single();
+
+    if (error) {
+      throw error;
+    }
 
     res.status(201).json({
       message: 'User registered successfully',
-      user: {
-        id: newUser._id,
-        name: newUser.name,
-        email: newUser.email,
-        role: newUser.role,
-      },
+      user: mapUser(newUser),
+      token: createToken(newUser),
     });
   } catch (err) {
     console.error('POST /register error:', err);
@@ -107,46 +199,52 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedEmail = normalizeEmail(email);
     const trimmedPassword = password.trim();
 
     // Check if this is the admin email
     if (trimmedEmail === 'admin@bitsa.com') {
       // Check if admin user exists in database
-      let adminUser = await User.findOne({ email: trimmedEmail });
+      let adminUser = await fetchUserByEmail(trimmedEmail, true);
       
       if (!adminUser) {
         // Create admin user if it doesn't exist (only if using default password)
         if (trimmedPassword === 'admin123') {
-          adminUser = new User({
-            name: 'Admin',
-            email: trimmedEmail,
-            password: trimmedPassword, // Will be hashed by pre-save hook
-            role: 'admin'
-          });
-          await adminUser.save();
+          const hashedPassword = await bcrypt.hash(trimmedPassword, 10);
+          const { data, error } = await supabase
+            .from('users')
+            .insert({
+              name: 'Admin',
+              email: trimmedEmail,
+              password: hashedPassword,
+              role: 'admin',
+              student_id: '',
+              course: '',
+              year: '',
+            })
+            .select(userSelect)
+            .single();
+
+          if (error) {
+            throw error;
+          }
+
+          adminUser = data;
           console.log('Admin user created in database');
         } else {
           return res.status(400).json({ message: 'Invalid credentials' });
         }
       } else {
         // Admin user exists - verify password (works with both default and changed passwords)
-        const isMatch = await adminUser.matchPassword(trimmedPassword);
+        const isMatch = await bcrypt.compare(trimmedPassword, adminUser.password);
         if (!isMatch) {
           return res.status(400).json({ message: 'Invalid credentials' });
-        }
-        
-        // Ensure user has admin role
-        if (adminUser.role !== 'admin') {
-          adminUser.role = 'admin';
-          await adminUser.save();
-          console.log('User role updated to admin');
         }
       }
 
       const token = jwt.sign(
-        { id: adminUser._id, role: 'admin' },
-        process.env.JWT_SECRET || 'your_jwt_secret',
+        { id: adminUser.id, role: 'admin' },
+        JWT_SECRET,
         { expiresIn: '1d' }
       );
 
@@ -155,11 +253,11 @@ router.post('/login', async (req, res) => {
         message: 'Login successful',
         token,
         user: {
-          id: adminUser._id,
+          id: adminUser.id,
           name: adminUser.name,
           email: adminUser.email,
           role: 'admin',
-          studentId: adminUser.studentId,
+          studentId: adminUser.student_id,
           course: adminUser.course,
           year: adminUser.year,
           photo: adminUser.photo,
@@ -168,13 +266,13 @@ router.post('/login', async (req, res) => {
     }
 
     // Regular user login
-    const user = await User.findOne({ email: trimmedEmail });
+    const user = await fetchUserByEmail(trimmedEmail, true);
     if (!user) {
       console.log('User not found for email:', trimmedEmail);
       return res.status(400).json({ message: 'Invalid credentials' });
     }
     
-    const isMatch = await user.matchPassword(trimmedPassword);
+    const isMatch = await bcrypt.compare(trimmedPassword, user.password);
     console.log('Password match:', isMatch);
 
     if (!isMatch) {
@@ -185,8 +283,8 @@ router.post('/login', async (req, res) => {
     }
     
     const token = jwt.sign(
-      { id: user._id, role: user.role },
-      process.env.JWT_SECRET || 'your_jwt_secret',
+      { id: user.id, role: user.role },
+      JWT_SECRET,
       { expiresIn: '1d' }
     );
 
@@ -194,16 +292,7 @@ router.post('/login', async (req, res) => {
     res.json({
       message: 'Login successful',
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        studentId: user.studentId,
-        course: user.course,
-        year: user.year,
-        photo: user.photo,
-      },
+      user: mapUser(user),
     });
   } catch (err) {
     console.error('POST /login error:', err);
@@ -212,8 +301,23 @@ router.post('/login', async (req, res) => {
 });
 router.delete('/:id', async (req, res) => {
   try {
-    const deleted = await User.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ message: 'User not found' });
+    const { data: existingUser, error: lookupError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+
+    if (lookupError) {
+      throw lookupError;
+    }
+
+    if (!existingUser) return res.status(404).json({ message: 'User not found' });
+
+    const { error } = await supabase.from('users').delete().eq('id', req.params.id);
+
+    if (error) {
+      throw error;
+    }
 
     res.json({ message: 'User deleted successfully' });
   } catch (err) {
@@ -229,14 +333,22 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ message: 'Email and new password are required' });
     }
 
-    const user = await User.findOne({ email });
+    const user = await fetchUserByEmail(email, true);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
     
-    user.password = newPassword;
-    await user.save();
+    const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
+
+    const { error } = await supabase
+      .from('users')
+      .update({ password: hashedPassword })
+      .eq('id', user.id);
+
+    if (error) {
+      throw error;
+    }
 
     res.json({ message: 'Password reset successfully. Please login with your new password.' });
   } catch (err) {
@@ -252,21 +364,28 @@ router.post('/fix-email', async (req, res) => {
       return res.status(400).json({ message: 'Both old and new email are required' });
     }
 
-    const user = await User.findOne({ email: oldEmail });
+    const user = await fetchUserByEmail(oldEmail);
     if (!user) {
       return res.status(404).json({ message: 'User with old email not found' });
     }
-    const existingUser = await User.findOne({ email: newEmail });
+    const existingUser = await fetchUserByEmail(newEmail);
     if (existingUser) {
       return res.status(400).json({ message: 'New email already exists' });
     }
-    user.email = newEmail;
-    await user.save();
+
+    const { error } = await supabase
+      .from('users')
+      .update({ email: normalizeEmail(newEmail) })
+      .eq('id', user.id);
+
+    if (error) {
+      throw error;
+    }
 
     res.json({ 
       message: 'Email updated successfully', 
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email
       }

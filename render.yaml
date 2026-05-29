@@ -1,0 +1,32 @@
+# Render service definition (example). Replace placeholders before use.
+# - Update `repo` to your GitHub repo URL and `branch` if needed.
+# - For secrets, reference them via `fromSecret` (add them in the Render dashboard Secrets section).
+
+services:
+  - type: web
+    name: bitsa-backend
+    env: node
+    repo: https://github.com/<your-org-or-username>/<your-repo>
+    branch: main
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: "5500"
+      - key: CLIENT_URL
+        value: "http://localhost:3000"
+      - key: SUPABASE_URL
+        fromSecret: SUPABASE_URL
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        fromSecret: SUPABASE_SERVICE_ROLE_KEY
+      - key: SUPABASE_ANON_KEY
+        fromSecret: SUPABASE_ANON_KEY
+      - key: JWT_SECRET
+        fromSecret: JWT_SECRET
+      - key: CLOUDINARY_CLOUD_NAME
+        fromSecret: CLOUDINARY_CLOUD_NAME
+      - key: CLOUDINARY_API_KEY
+        fromSecret: CLOUDINARY_API_KEY
+      - key: CLOUDINARY_API_SECRET
+        fromSecret: CLOUDINARY_API_SECRET

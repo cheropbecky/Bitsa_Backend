@@ -1,12 +1,44 @@
-const Gallery = require("../models/Gallery");
-// Assuming these are the helper functions used in other controllers
+const { supabase } = require("../config/supabase");
 const { uploadToCloudinary, deleteFromCloudinary } = require("../config/cloudinary"); 
+
+const gallerySelect = 'id,title,description,image_url,public_id,created_at';
+
+const mapGalleryItem = (item) => ({
+  id: item.id,
+  title: item.title,
+  description: item.description,
+  imageUrl: item.image_url,
+  publicId: item.public_id,
+  createdAt: item.created_at,
+});
+
+const fetchGalleryItemById = async (id) => {
+  const { data, error } = await supabase
+    .from('gallery_items')
+    .select(gallerySelect)
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
 
 // GET all gallery items
 exports.getGallery = async (req, res) => {
   try {
-    const items = await Gallery.find().sort({ createdAt: -1 });
-    res.json(items);
+    const { data: items, error } = await supabase
+      .from('gallery_items')
+      .select(gallerySelect)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    res.json(items.map(mapGalleryItem));
   } catch (err) {
     console.error("Error fetching gallery:", err);
     res.status(500).json({ message: "Server error fetching gallery" });
@@ -29,14 +61,22 @@ exports.addGalleryItem = async (req, res) => {
       return res.status(400).json({ message: "No image uploaded or URL provided" });
     }
 
-    const newItem = await Gallery.create({
-      title: title || "Untitled",
-      description: description || "",
-      imageUrl: imageData.url,
-      publicId: imageData.publicId,
-    });
+    const { data: newItem, error } = await supabase
+      .from('gallery_items')
+      .insert({
+        title: title || "Untitled",
+        description: description || "",
+        image_url: imageData.url,
+        public_id: imageData.publicId,
+      })
+      .select(gallerySelect)
+      .single();
 
-    res.status(201).json({ message: "Gallery item added", item: newItem });
+    if (error) {
+      throw error;
+    }
+
+    res.status(201).json({ message: "Gallery item added", item: mapGalleryItem(newItem) });
   } catch (err) {
     console.error("Error adding gallery item:", err);
     res.status(500).json({ message: "Server error adding gallery item" });
@@ -49,20 +89,20 @@ exports.updateGalleryItem = async (req, res) => {
     const { id } = req.params;
     const { title, description, imageUrl: externalUrl } = req.body;
 
-    const item = await Gallery.findById(id);
+    const item = await fetchGalleryItemById(id);
     if (!item) return res.status(404).json({ message: "Gallery item not found" });
 
     // Update text fields
-    if (title) item.title = title;
-    if (description) item.description = description;
+    const nextTitle = title || item.title;
+    const nextDescription = description !== undefined ? description : item.description;
 
-    let newImagePublicId = item.publicId;
-    let newImageUrl = item.imageUrl;
+    let newImagePublicId = item.public_id;
+    let newImageUrl = item.image_url;
 
     // Handle image update/replacement
     if (req.file) {
       // New file uploaded: Delete old image, upload new one
-      if (item.publicId) await deleteFromCloudinary(item.publicId);
+      if (item.public_id) await deleteFromCloudinary(item.public_id);
 
       const imageData = await uploadToCloudinary(req.file.buffer, "bitsa_gallery");
       newImageUrl = imageData.url;
@@ -70,23 +110,35 @@ exports.updateGalleryItem = async (req, res) => {
 
     } else if (externalUrl) {
       // External URL provided: Delete old Cloudinary image (if exists) and use new URL
-      if (item.publicId) await deleteFromCloudinary(item.publicId);
+      if (item.public_id) await deleteFromCloudinary(item.public_id);
 
       newImageUrl = externalUrl;
       newImagePublicId = null;
       
-    } else if (!externalUrl && item.publicId) {
+    } else if (!externalUrl && item.public_id) {
       // Image cleared by user (neither file nor URL provided, but old image exists)
-      await deleteFromCloudinary(item.publicId);
+      await deleteFromCloudinary(item.public_id);
       newImageUrl = null;
       newImagePublicId = null;
     }
 
-    item.imageUrl = newImageUrl;
-    item.publicId = newImagePublicId;
+    const { data: updatedItem, error } = await supabase
+      .from('gallery_items')
+      .update({
+        title: nextTitle,
+        description: nextDescription,
+        image_url: newImageUrl,
+        public_id: newImagePublicId,
+      })
+      .eq('id', id)
+      .select(gallerySelect)
+      .single();
 
-    await item.save();
-    res.json({ message: "Gallery item updated", item });
+    if (error) {
+      throw error;
+    }
+
+    res.json({ message: "Gallery item updated", item: mapGalleryItem(updatedItem) });
   } catch (err) {
     console.error("Error updating gallery item:", err);
     res.status(500).json({ message: "Server error updating gallery item" });
@@ -96,17 +148,21 @@ exports.updateGalleryItem = async (req, res) => {
 // DELETE gallery item (admin)
 exports.deleteGalleryItem = async (req, res) => {
   try {
-    const item = await Gallery.findById(req.params.id);
+    const item = await fetchGalleryItemById(req.params.id);
     if (!item) return res.status(404).json({ message: "Gallery item not found" });
 
     // Delete image from Cloudinary if exists
-    if (item.publicId) {
+    if (item.public_id) {
       // Assuming deleteFromCloudinary uses cloudinary.uploader.destroy internally
-      await deleteFromCloudinary(item.publicId); 
+      await deleteFromCloudinary(item.public_id); 
     }
 
     // Delete from DB
-    await item.deleteOne();
+    const { error } = await supabase.from('gallery_items').delete().eq('id', req.params.id);
+
+    if (error) {
+      throw error;
+    }
 
     res.json({ message: "Gallery item removed" });
   } catch (err) {

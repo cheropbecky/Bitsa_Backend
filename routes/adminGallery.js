@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const multer = require("multer");
 const cloudinary = require("../config/cloudinary");
-const Gallery = require("../models/Gallery");
+const { supabase } = require("../config/supabase");
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
@@ -20,15 +20,29 @@ router.post("/gallery", upload.single("image"), async (req, res) => {
           return res.status(500).json({ message: "Error uploading to Cloudinary" });
         }
 
-        // Save to DB
-        const newImage = await Gallery.create({
-          title: req.body.title,
-          description: req.body.description,
-          imageUrl: result.secure_url,
-          publicId: result.public_id,
-        });
+        const { data: newImage, error } = await supabase
+          .from('gallery_items')
+          .insert({
+            title: req.body.title,
+            description: req.body.description || '',
+            image_url: result.secure_url,
+            public_id: result.public_id,
+          })
+          .select('id,title,description,image_url,public_id,created_at')
+          .single();
 
-        res.status(201).json(newImage);
+        if (error) {
+          throw error;
+        }
+
+        res.status(201).json({
+          id: newImage.id,
+          title: newImage.title,
+          description: newImage.description,
+          imageUrl: newImage.image_url,
+          publicId: newImage.public_id,
+          createdAt: newImage.created_at,
+        });
       }
     );
 

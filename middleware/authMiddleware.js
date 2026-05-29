@@ -1,5 +1,23 @@
 const jwt = require("jsonwebtoken");
-const User = require("../models/User");
+const { supabase } = require("../config/supabase");
+
+const publicUserSelect = 'id,name,email,role,student_id,course,year,photo,created_at';
+
+const mapUser = (user) => {
+  if (!user) return null;
+
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    studentId: user.student_id || '',
+    course: user.course || '',
+    year: user.year || '',
+    photo: user.photo || '',
+    createdAt: user.created_at,
+  };
+};
 
 // Protect routes - for regular authenticated users
 const protect = async (req, res, next) => {
@@ -24,7 +42,17 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ message: "Invalid token format. Please log in again." });
     }
     
-    req.user = await User.findById(decoded.id).select("-password");
+    const { data: user, error } = await supabase
+      .from('users')
+      .select(publicUserSelect)
+      .eq('id', decoded.id)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    req.user = mapUser(user);
     
     if (!req.user) {
       return res.status(401).json({ message: "User account not found. Please log in again." });
@@ -71,7 +99,16 @@ const verifyAdmin = async (req, res, next) => {
     
     // If token has an id (user token), fetch the user to get email
     if (decoded.id) {
-      const user = await User.findById(decoded.id).select('email name');
+      const { data: user, error } = await supabase
+        .from('users')
+        .select('id,name,email,role')
+        .eq('id', decoded.id)
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
       if (!user) {
         return res.status(401).json({ message: 'User not found. Please login again.' });
       }
